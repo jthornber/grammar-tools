@@ -46,9 +46,9 @@ lits = alt . map lit
 opt x = alt [x, epsilon]
 comma = terminal ","
 
-identifier = terminal "<identifier>"
-constant = terminal "<constant>"
-stringLiteral = terminal "<string-literal>"
+identifier = terminal "IDENTIFIER"
+constant = terminal "CONSTANT"
+stringLiteral = terminal "STRING-LITERAL"
 
 ---------------
 -- Expressions
@@ -481,40 +481,61 @@ nonTerminals g = scan g M.empty
 -- Top level
 --
 
+-- repeatedly apply a function until there's no change
+stabilise :: (Eq a) => (a -> a) -> a -> a
+stabilise fn x = if x == x'
+    then x
+    else stabilise fn x'
+    where
+        x' = fn x
+
+-- FIXME: collapse Alt [x1 ... (Alt [y1 ... yn]) ... xn] -> Alt [x1 ... xn, y1 .. yn]
+
+-- The refactoring is easier if we force every non terminal to
+-- be of the form (Alt (Seq ...) (Seq ...) ...).  This may
+-- require adding new intermediate non terminals.
+normalise :: Grammar -> Grammar
+normalise = M.map (stabilise norm)
+    where
+        norm = stripEpsilonSeq . collapseAltAlt
+
+        stripEpsilonSeq (Seq gs) =
+            case filter (not . isEpsilon) gs of
+                [] -> Epsilon
+                gs' -> Seq gs'
+        stripEpsilonSeq r = r
+
+        collapseAltAlt (Seq gs) = Seq $ collapseAlts gs
+        collapseAltAlt (Alt gs) =
+            case partition isAlt (collapseAlts gs) of
+                (alts, notAlts) -> Alt $ (collapseAlts notAlts) ++
+                      (concatMap unwrap (collapseAlts alts))
+            where
+                unwrap (Alt gs) = gs
+                unwrap _ = error "not an alt"
+        collapseAltAlt g = g
+
+        collapseAlts = map collapseAltAlt
+
+        isEpsilon Epsilon = True
+        isEpsilon _ = False
+
+        isAlt (Alt _) = True
+        isAlt _ = False
+
 -- Remove epsilons
 -- 1) find a non-terminal that accepts epsilon (A)
 -- 2) remove that non terminal, and introduce another similar one (A') that doesn't have the epsilon production
 -- 3) replace every rule, g, that uses A with (Alt (subst A A' g) (remove A g))
 -- 4) repeat
 
-{-
-substWithEpsilon :: Rule_ -> String -> Rule_
-substWithEpsilon (Seq g1@(NonTerminal nt _) g2) nm =
-    if nm == nt
-        then Alt (Seq g1 g2') g2'
-        else Seq g1 g2'
-    where
-        g2' = substWithEpsilon g2 nm
-substWithEpsilon (Alt g1 g2) nm =
-    Alt (substWithEpsilon g1 nm) (substWithEpsilon g2 nm)
-substWithEpsilon g _ = g
--}
+-- (Seq [y1 ... yx(Alt [x1, x2 ... Epsilon ... xn-1, xn]) ... yn] ->
+-- (Alt (Seq [y1 ... (Alt (filter (not . isEpsilon) [x1 ... xn]) ... yn])
+     -- (Seq [y1 ... !yx ... yn])
 
--- Remove left recursion
---
-
-{-
-
-
-showRule (Terminal _) = "<terminal>"
-showRule (NonTerminal nm g) = nm ++ ": " ++ (showRule' g)
-showRule (Seq _ _) = "<seq>"
-showRule (Alt _ _) = "<alt>"
-showRule Epsilon = "<epsilon>"
-        -}
 
 cGrammar :: Grammar
-cGrammar = nonTerminals translationUnit
+cGrammar = normalise . nonTerminals $ translationUnit
 
 type Doc = PP.Doc ()
 
