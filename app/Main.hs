@@ -2,8 +2,8 @@ module Main where
 
 import Control.Monad
 import Data.List
-import Data.Map (Map)
-import qualified Data.Map as M
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as M
 import Data.Set (Set)
 import qualified Data.Text.Prettyprint.Doc as PP
 import qualified Data.Text.Prettyprint.Doc.Util as PP
@@ -510,7 +510,9 @@ stabilise fn x = if x == x'
 -- be of the form (Alt (Seq ...) (Seq ...) ...).  This may
 -- require adding new intermediate non terminals.
 normalise :: Grammar -> Grammar
-normalise = M.map (stabilise norm)
+normalise = eliminateUnreferenced .
+            eliminateUnits .
+            M.map (stabilise norm)
     where
         norm = stripEpsilonSeq . collapseAltAlt . liftAlt . rmSingletons
 
@@ -555,13 +557,46 @@ normalise = M.map (stabilise norm)
         getAlts (Alt xs) = xs
         getAlts _ = []
 
--- To remove immediate left recursion of the form, we replace:
---   A -> Aa | b
--- with
---   A -> bA'
---   A' -> aA' | epsilon
+-- Unit productions have the form A -> B, so every use
+-- of A can be replaced with B, eliminating A
+eliminateUnits :: Grammar -> Grammar
+eliminateUnits g = foldr (\p g -> M.map (ntReplace p) g) g units
+    where
+        units = concatMap findUnits . M.toList $ g
 
--- The rule should be in normal form, ie. an Alt of Seqs, and
+        findUnits :: Production -> [(Identifier, Identifier)]
+        findUnits (x, (NonTerminal y)) = [(x, y)]
+        findUnits (x, (Alt [NonTerminal y])) = [(x, y)]
+        findUnits (x, (Seq [NonTerminal y])) = [(x, y)]
+        findUnits (x, (Alt [Seq [NonTerminal y]])) = [(x, y)]
+        findUnits _ = []
+
+        ntReplace :: (Identifier, Identifier) -> Rule -> Rule
+        ntReplace (old, new) r@(NonTerminal old') =
+            if old == old'
+                then NonTerminal new
+                else r
+        ntReplace p (Seq gs) = Seq $ map (ntReplace p) gs
+        ntReplace p (Alt gs) = Alt $ map (ntReplace p) gs
+        ntReplace p r = r
+
+eliminateUnreferenced :: Grammar -> Grammar
+eliminateUnreferenced g = foldr erase g unrefs
+    where
+        all = S.fromList . M.keys $ g
+        refs = foldr findRefs S.empty $ M.elems g
+        unrefs = S.toList $ all `S.difference` refs
+
+        erase :: Identifier -> Grammar -> Grammar
+        erase nm g = M.delete nm g
+
+        findRefs :: Rule -> Set Identifier -> Set Identifier
+        findRefs (NonTerminal nm) s = S.insert nm s
+        findRefs (Seq gs) s = foldr findRefs s gs
+        findRefs (Alt gs) s = foldr findRefs s gs
+        findRefs _ s = s
+
+-- The rule shold be in normal form, ie. an Alt of Seqs, and
 -- no deeper
 rmImmediateRecursion' :: Production -> [Production]
 rmImmediateRecursion' p@(nm, Seq (NonTerminal nm':gs)) =
@@ -571,10 +606,18 @@ rmImmediateRecursion' p@(nm, Seq (NonTerminal nm':gs)) =
 rmImmediateRecursion' p@(nm, Alt gs) =
     case partition (beginsWith nm) gs of
         ([], _) -> [p]
-        (gs1, gs2) -> [(nm, Alt $ map append gs2),
-                       (nm', Alt $ (Epsilon :) $ map (append . dropFirst) gs1)]
+        (gs1, gs2) -> [(nmHead, Alt gs2),
+                       (nmTail, Alt $ map dropFirst gs1),
+                       (nmTails, Alt [Seq [NonTerminal nmTail,
+                                           NonTerminal nmTails],
+                                      NonTerminal nmTail]),
+                       (nm, Alt [Seq [NonTerminal nmHead, NonTerminal nmTails],
+                                 NonTerminal nmHead
+                                 ])]
     where
-        nm' = extendId "1" nm
+        nmHead = extendId "head" nm
+        nmTail = extendId "tail" nm
+        nmTails = extendId "tails" nm
 
         beginsWith :: Identifier -> Rule -> Bool
         beginsWith nm (Seq ((NonTerminal nm'):_)) = nm == nm'
@@ -584,8 +627,6 @@ rmImmediateRecursion' p@(nm, Alt gs) =
         dropFirst (Seq (x:xs)) = Seq xs
         dropFirst r = r
 
-        append (Seq xs) = Seq $ xs ++ [NonTerminal nm']
-        append x = append (Seq [x])
 rmImmediateRecursion' p = [p]
 
 rmImmediateRecursion :: Grammar -> Grammar
