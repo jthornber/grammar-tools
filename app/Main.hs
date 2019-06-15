@@ -53,7 +53,7 @@ stringLiteral = terminal "STRING-LITERAL"
 ---------------
 -- Expressions
 --
-primaryExpression = nonTerminal "PrimaryExpression" $
+primaryExpression = nonTerminal "primary-expression" $
     alt [identifier,
          constant,
          stringLiteral,
@@ -497,12 +497,13 @@ stabilise fn x = if x == x'
 normalise :: Grammar -> Grammar
 normalise = M.map (stabilise norm)
     where
-        norm = stripEpsilonSeq . collapseAltAlt
+        norm = stripEpsilonSeq . collapseAltAlt . liftAlt . rmSingletons
 
         stripEpsilonSeq (Seq gs) =
             case filter (not . isEpsilon) gs of
                 [] -> Epsilon
-                gs' -> Seq gs'
+                gs' -> Seq (map stripEpsilonSeq gs')
+        stripEpsilonSeq (Alt gs) = Alt $ map stripEpsilonSeq gs
         stripEpsilonSeq r = r
 
         collapseAltAlt (Seq gs) = Seq $ collapseAlts gs
@@ -517,21 +518,33 @@ normalise = M.map (stabilise norm)
 
         collapseAlts = map collapseAltAlt
 
+        -- Seq [... Alt [a1, a2 ...] -> Alt [Seq [... a1 ...], Seq [... a2 ...]]
+        liftAlt (Seq gs) = case break isAlt gs of
+            (_, []) -> Seq $ map liftAlt gs
+            (prefix, xs:postfix) -> Alt (map (\x -> Seq $ prefix ++ [x] ++ postfix) (getAlts xs))
+        liftAlt (Alt gs) = Alt (map liftAlt gs)
+        liftAlt g = g
+
+        rmSingletons (Seq [g]) = rmSingletons g
+        rmSingletons (Seq gs) = Seq $ map rmSingletons gs
+        rmSingletons (Alt [g]) = rmSingletons g
+        rmSingletons (Alt gs) = Alt $ map rmSingletons gs
+        rmSingletons g = g
+
         isEpsilon Epsilon = True
         isEpsilon _ = False
 
         isAlt (Alt _) = True
         isAlt _ = False
 
--- Remove epsilons
--- 1) find a non-terminal that accepts epsilon (A)
--- 2) remove that non terminal, and introduce another similar one (A') that doesn't have the epsilon production
--- 3) replace every rule, g, that uses A with (Alt (subst A A' g) (remove A g))
--- 4) repeat
+        getAlts (Alt xs) = xs
+        getAlts _ = []
 
--- (Seq [y1 ... yx(Alt [x1, x2 ... Epsilon ... xn-1, xn]) ... yn] ->
--- (Alt (Seq [y1 ... (Alt (filter (not . isEpsilon) [x1 ... xn]) ... yn])
-     -- (Seq [y1 ... !yx ... yn])
+-- FIXME: we should remove epsilons, but there aren't any left in the
+-- C grammar after normalisation.
+
+-- rmLeftRecursion :: [(String, Rule)] -> [(String, Rule)]
+-- rmLeftRecursion rs =
 
 
 cGrammar :: Grammar
