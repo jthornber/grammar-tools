@@ -11,6 +11,8 @@ import qualified Data.Set as S
 
 import Prelude hiding (seq)
 
+import Debug.Trace
+
 -- This program takes the C grammar as defined in the standard and
 -- removes epsilon rules and left recursion.  Leaving something
 -- suitable to be implemented in a recursive descent parser.
@@ -449,14 +451,27 @@ declarationList = nonTerminal "declaration-list" $
 ----------------------------
 -- Now for representation 2
 --
+data Identifier = Identifier [String]
+    deriving (Eq, Show, Ord)
+
+mkId :: String -> Identifier
+mkId = Identifier . (: [])
+
+extendId :: String -> Identifier -> Identifier
+extendId nm (Identifier nms) = Identifier $ nm : nms
+
+instance PP.Pretty Identifier where
+    pretty (Identifier nm) = PP.pretty . concat . intersperse "-" . reverse $ nm
+
 data Rule = Terminal String |
-            NonTerminal String |
+            NonTerminal Identifier |
             Alt [Rule] |
             Seq [Rule] |
             Epsilon
     deriving (Eq, Show)
 
-type Grammar = Map String Rule
+type Production = (Identifier, Rule)
+type Grammar = Map Identifier Rule
 
 nonTerminals :: Rule_ -> Grammar
 nonTerminals g = scan g M.empty
@@ -464,15 +479,15 @@ nonTerminals g = scan g M.empty
         scan :: Rule_ -> Grammar -> Grammar
         scan (Terminal_ _) acc = acc
         scan g@(NonTerminal_ nm g') acc =
-            case M.lookup nm acc of
+            case M.lookup (mkId nm) acc of
                 Just _ -> acc
-                Nothing -> scan g' $ M.insert nm (convertRule g') acc
+                Nothing -> scan g' $ M.insert (mkId nm) (convertRule g') acc
         scan (Seq_ gs) acc = foldr scan acc gs
         scan (Alt_ gs) acc = foldr scan acc gs
         scan Epsilon_ acc = acc
 
         convertRule (Terminal_ t) = Terminal t
-        convertRule (NonTerminal_ t _) = NonTerminal t
+        convertRule (NonTerminal_ t _) = NonTerminal (Identifier [t])
         convertRule (Alt_ gs) = Alt $ map convertRule gs
         convertRule (Seq_ gs) = Seq $ map convertRule gs
         convertRule Epsilon_ = Epsilon
@@ -540,15 +555,70 @@ normalise = M.map (stabilise norm)
         getAlts (Alt xs) = xs
         getAlts _ = []
 
+-- To remove immediate left recursion of the form, we replace:
+--   A -> Aa | b
+-- with
+--   A -> bA'
+--   A' -> aA' | epsilon
+
+-- The rule should be in normal form, ie. an Alt of Seqs, and
+-- no deeper
+rmImmediateRecursion' :: Production -> [Production]
+rmImmediateRecursion' p@(nm, Seq (NonTerminal nm':gs)) =
+    if nm == nm'
+        then error "not sure how to fix this form of left recursion"
+        else [p]
+rmImmediateRecursion' p@(nm, Alt gs) =
+    case partition (beginsWith nm) gs of
+        ([], _) -> [p]
+        (gs1, gs2) -> [(nm, Alt $ map append gs2),
+                       (nm', Alt $ (Epsilon :) $ map (append . dropFirst) gs1)]
+    where
+        nm' = extendId "1" nm
+
+        beginsWith :: Identifier -> Rule -> Bool
+        beginsWith nm (Seq ((NonTerminal nm'):_)) = nm == nm'
+        beginsWith _ _ = False
+
+        dropFirst (Seq []) = error "bang"
+        dropFirst (Seq (x:xs)) = Seq xs
+        dropFirst r = r
+
+        append (Seq xs) = Seq $ xs ++ [NonTerminal nm']
+        append x = append (Seq [x])
+rmImmediateRecursion' p = [p]
+
+rmImmediateRecursion :: Grammar -> Grammar
+rmImmediateRecursion g = M.fromList ps
+    where
+        ps = concatMap rmImmediateRecursion' $ M.toList g
+
+--rmRecursion :: Grammar -> Grammar
+-- FIXME: prune productions that aren't reachable from the top level
+
 -- FIXME: we should remove epsilons, but there aren't any left in the
 -- C grammar after normalisation.
 
+-- We want to do the equivalent of:
+-- for (i = 0; i < nr_rules; i++)
+--     for (j = 0; j < i; j++)
+--        do_thing()
+
+-- FIXME: use a sequence
+-- across :: (a -> a -> a) -> [a] -> [a]
+
+-- rmImmediateRecursion ::
 -- rmLeftRecursion :: [(String, Rule)] -> [(String, Rule)]
 -- rmLeftRecursion rs =
 
 
 cGrammar :: Grammar
-cGrammar = normalise . nonTerminals $ translationUnit
+cGrammar =
+    normalise .
+    rmImmediateRecursion .
+    normalise .
+    nonTerminals $
+    translationUnit
 
 type Doc = PP.Doc ()
 
@@ -564,3 +634,5 @@ main = forM_ (M.toList cGrammar) $ \(nm, g) -> do
     putStrLn ""
     putStrLn ""
 
+traceIt :: (Show a) => a -> a
+traceIt x = trace (show x) x
