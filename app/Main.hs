@@ -632,11 +632,31 @@ elimImmediateRecursion =
     concatMap elimImmediateRecursion' .
     M.toList
 
+references :: Identifier -> Grammar' -> [Identifier]
+references nm g = case M.lookup nm g of
+    Just (Rule' rs) -> concatMap getId . concat $ rs
+    Nothing -> error "couldn't find identifier in grammar"
+    where
+        getId :: Elt -> [Identifier]
+        getId (NonTerminal' nm) = [nm]
+        getId _ = []
+
+-- Grabs the identifiers from the botton up
+getIdentifiers :: Grammar' -> Identifier -> [Identifier]
+getIdentifiers g nm = loop [nm] [] (S.singleton nm)
+    where
+        loop :: [Identifier] -> [Identifier] -> Set Identifier -> [Identifier]
+        loop [] acc seen = acc
+        loop (x:xs) acc seen = loop (xs ++ unseen) (x:acc) (foldr (\nm s -> S.insert nm s) seen unseen)
+            where
+                rs = references x g
+                unseen = filter (not . (\nm -> S.member nm seen)) rs
+
 elimRecursion :: Grammar' -> Grammar'
 elimRecursion g = foldr elim g pairs
     where
         -- FIXME: ordering is important for this
-        nms = M.keys g
+        nms = getIdentifiers g start
 
         pairs :: [(Identifier, [Identifier])]
         pairs = map (\(x:xs) -> (x, xs)) . drop 1 . reverse . tails . reverse $ nms
