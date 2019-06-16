@@ -632,6 +632,30 @@ elimImmediateRecursion =
     concatMap elimImmediateRecursion' .
     M.toList
 
+elimRecursion :: Grammar' -> Grammar'
+elimRecursion g = foldr elim g pairs
+    where
+        -- FIXME: ordering is important for this
+        nms = M.keys g
+
+        pairs :: [(Identifier, [Identifier])]
+        pairs = map (\(x:xs) -> (x, xs)) . drop 1 . reverse . tails . reverse $ nms
+
+        elim :: (Identifier, [Identifier]) -> Grammar' -> Grammar'
+        elim (i, js) g = foldr (subst i) g js
+
+        subst :: Identifier -> Identifier -> Grammar' -> Grammar'
+        subst i j g = case M.lookup i g of
+            Just (Rule' gs) -> M.insert i (Rule' $ concatMap (expand j) gs) g
+            Nothing -> error "couldn't find non terminal in grammar"
+
+        expand :: Identifier -> [Elt] -> [[Elt]]
+        expand j ((NonTerminal' nm):xs) | nm == j =
+            case M.lookup j g of
+                Just (Rule' js) -> map (++ xs) js
+                Nothing -> error "couldn't find non terminal in grammar"
+        expand j elts = [elts]
+
 -- Unit productions have the form A -> B, so every use
 -- of A can be replaced with B, eliminating A
 elimUnits :: Grammar' -> Grammar'
@@ -650,11 +674,11 @@ elimUnits g = foldr (\p g -> M.map ((uncurry replace) p) g) g units
         replaceElt old new e@(NonTerminal' nm) | old == nm = NonTerminal' new
         replaceElt _ _ r = r
 
-elimUnreferenced :: Grammar' -> Grammar'
-elimUnreferenced g = foldr erase g unrefs
+elimUnreferenced :: Identifier -> Grammar' -> Grammar'
+elimUnreferenced top g = foldr erase g unrefs
     where
         all = S.fromList . M.keys $ g
-        refs = foldr findRefs S.empty $ M.elems g
+        refs = S.insert top $ foldr findRefs S.empty $ M.elems g
         unrefs = S.toList $ all `S.difference` refs
 
         erase :: Identifier -> Grammar' -> Grammar'
@@ -667,9 +691,16 @@ elimUnreferenced g = foldr erase g unrefs
         fromElt (NonTerminal' nm) s = S.insert nm s
         fromElt _ s = s
 
+start :: Identifier
+start = mkId "translation-unit"
+
 cGrammar :: Grammar'
 cGrammar =
-    elimUnreferenced .
+    elimUnreferenced start .
+    elimUnits .
+    elimImmediateRecursion .
+    elimRecursion .
+    elimUnreferenced start .
     elimUnits .
     elimImmediateRecursion .
     toRep3 .
