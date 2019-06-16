@@ -24,7 +24,15 @@ import Debug.Trace
 -- which is harder for us to process since we'd need to keep passing
 -- around a 'seen' set to avoid processing the same production more
 -- than once.
-data Rule_ = Terminal_ String |
+data Lex = Literal String |
+           Token String
+    deriving (Eq, Show)
+
+instance PP.Pretty Lex where
+    pretty (Literal str) = PP.pretty "\"" <> PP.pretty str <> PP.pretty "\""
+    pretty (Token str) = PP.pretty str
+
+data Rule_ = Terminal_ Lex |
              NonTerminal_ String Rule_ |
              Seq_ [Rule_] |
              Alt_ [Rule_] |
@@ -32,7 +40,6 @@ data Rule_ = Terminal_ String |
         deriving (Eq, Show)
 
 -- so we can change the representation later
-terminal = Terminal_
 nonTerminal = NonTerminal_
 
 seq  = Seq_
@@ -40,17 +47,20 @@ alt = Alt_
 epsilon = Epsilon_
 
 lit :: String -> Rule_
-lit = terminal
+lit = Terminal_ . Literal
+
+token :: String -> Rule_
+token = Terminal_ . Token
 
 lits :: [String] -> Rule_
 lits = alt . map lit
 
 opt x = alt [x, epsilon]
-comma = terminal ","
+comma = lit ","
 
-identifier = terminal "IDENTIFIER"
-constant = terminal "CONSTANT"
-stringLiteral = terminal "STRING-LITERAL"
+identifier = token "IDENTIFIER"
+constant = token "CONSTANT"
+stringLiteral = token "STRING-LITERAL"
 
 ---------------
 -- Expressions
@@ -304,9 +314,9 @@ directDeclarator = nonTerminal "direct-declarator" $
     alt [identifier,
          seq [lit "(", declarator, lit ")"],
          seq [directDeclarator, lit "[", opt typeQualifierList, opt assignmentExpression, lit "]"],
-         seq [directDeclarator, lit "[", lit "static", opt typeQualifierList, assignmentExpression],
-         seq [directDeclarator, lit "[", typeQualifierList, lit "static", assignmentExpression],
-         seq [directDeclarator, lit "[", opt typeQualifierList, lit "*"],
+         seq [directDeclarator, lit "[", lit "static", opt typeQualifierList, assignmentExpression, lit "]"],
+         seq [directDeclarator, lit "[", typeQualifierList, lit "static", assignmentExpression, lit "]"],
+         seq [directDeclarator, lit "[", opt typeQualifierList, lit "*", lit "]"],
          seq [directDeclarator, lit "(", parameterTypeList, lit ")"],
          seq [directDeclarator, lit "(", opt identifierList, lit ")"]
          ]
@@ -463,7 +473,7 @@ extendId nm (Identifier nms) = Identifier $ nm : nms
 instance PP.Pretty Identifier where
     pretty (Identifier nm) = PP.pretty . concat . intersperse "-" . reverse $ nm
 
-data Rule = Terminal String |
+data Rule = Terminal Lex |
             NonTerminal Identifier |
             Alt [Rule] |
             Seq [Rule] |
@@ -510,9 +520,7 @@ stabilise fn x = if x == x'
 -- be of the form (Alt (Seq ...) (Seq ...) ...).  This may
 -- require adding new intermediate non terminals.
 normalise :: Grammar -> Grammar
-normalise = eliminateUnreferenced .
-            eliminateUnits .
-            M.map (stabilise norm)
+normalise = M.map (stabilise norm)
     where
         norm = stripEpsilonSeq . collapseAltAlt . liftAlt . rmSingletons
 
@@ -557,118 +565,124 @@ normalise = eliminateUnreferenced .
         getAlts (Alt xs) = xs
         getAlts _ = []
 
--- Unit productions have the form A -> B, so every use
--- of A can be replaced with B, eliminating A
-eliminateUnits :: Grammar -> Grammar
-eliminateUnits g = foldr (\p g -> M.map (ntReplace p) g) g units
+-----------------------------------------
+-- Now that we've normalised we can change rep
+-- once again to force it to stay normalised.
+
+data Elt = Terminal' Lex | NonTerminal' Identifier deriving (Eq, Show)
+
+instance PP.Pretty Elt where
+    pretty (Terminal' l) = PP.pretty l
+    pretty (NonTerminal' nm) = PP.pretty nm
+
+-- Rules are now forced to be an implicit Alt of Seqs
+data Rule' = Rule' [[Elt]] deriving (Eq, Show)
+
+type Production' = (Identifier, Rule')
+type Grammar' = Map Identifier Rule'
+
+toRep3 :: Grammar -> Grammar'
+toRep3 = M.fromList . map convert . M.toList
     where
-        units = concatMap findUnits . M.toList $ g
+        convert :: Production -> Production'
+        convert (nm, r) = (nm, convertRule r)
 
-        findUnits :: Production -> [(Identifier, Identifier)]
-        findUnits (x, (NonTerminal y)) = [(x, y)]
-        findUnits (x, (Alt [NonTerminal y])) = [(x, y)]
-        findUnits (x, (Seq [NonTerminal y])) = [(x, y)]
-        findUnits (x, (Alt [Seq [NonTerminal y]])) = [(x, y)]
-        findUnits _ = []
+        convertRule :: Rule -> Rule'
+        convertRule (Alt seqs) = Rule' $ map convertSeq seqs
+        convertRule (Seq xs) = Rule' [map convertElt xs]
+        convertRule (Terminal l) = Rule' [[Terminal' l]]
+        convertRule (NonTerminal nm') = Rule' [[NonTerminal' nm']]
 
-        ntReplace :: (Identifier, Identifier) -> Rule -> Rule
-        ntReplace (old, new) r@(NonTerminal old') =
-            if old == old'
-                then NonTerminal new
-                else r
-        ntReplace p (Seq gs) = Seq $ map (ntReplace p) gs
-        ntReplace p (Alt gs) = Alt $ map (ntReplace p) gs
-        ntReplace p r = r
+        convertSeq :: Rule -> [Elt]
+        convertSeq (Terminal l) = [Terminal' l]
+        convertSeq (NonTerminal nm) = [NonTerminal' nm]
+        convertSeq (Seq gs) = map convertElt gs
+        convertSeq (Alt _) = error "nested Alt"
+        convertSeq Epsilon = error "epsilon still present"
 
-eliminateUnreferenced :: Grammar -> Grammar
-eliminateUnreferenced g = foldr erase g unrefs
-    where
-        all = S.fromList . M.keys $ g
-        refs = foldr findRefs S.empty $ M.elems g
-        unrefs = S.toList $ all `S.difference` refs
-
-        erase :: Identifier -> Grammar -> Grammar
-        erase nm g = M.delete nm g
-
-        findRefs :: Rule -> Set Identifier -> Set Identifier
-        findRefs (NonTerminal nm) s = S.insert nm s
-        findRefs (Seq gs) s = foldr findRefs s gs
-        findRefs (Alt gs) s = foldr findRefs s gs
-        findRefs _ s = s
+        convertElt :: Rule -> Elt
+        convertElt (Terminal l) = Terminal' l
+        convertElt (NonTerminal nm) = NonTerminal' nm
+        convertElt _ = error "not an element"
 
 -- The rule shold be in normal form, ie. an Alt of Seqs, and
 -- no deeper
-rmImmediateRecursion' :: Production -> [Production]
-rmImmediateRecursion' p@(nm, Seq (NonTerminal nm':gs)) =
-    if nm == nm'
-        then error "not sure how to fix this form of left recursion"
-        else [p]
-rmImmediateRecursion' p@(nm, Alt gs) =
+elimImmediateRecursion' :: Production' -> [Production']
+elimImmediateRecursion' p@(nm, Rule' gs) =
     case partition (beginsWith nm) gs of
         ([], _) -> [p]
-        (gs1, gs2) -> [(nmHead, Alt gs2),
-                       (nmTail, Alt $ map dropFirst gs1),
-                       (nmTails, Alt [Seq [NonTerminal nmTail,
-                                           NonTerminal nmTails],
-                                      NonTerminal nmTail]),
-                       (nm, Alt [Seq [NonTerminal nmHead, NonTerminal nmTails],
-                                 NonTerminal nmHead
-                                 ])]
+        (gs1, gs2) -> [(nmHead, Rule' gs2),
+                       (nmTail, Rule' $ map tail gs1),
+                       (nmTails, Rule' $ [[NonTerminal' nmTail, NonTerminal' nmTails],
+                                          [NonTerminal' nmTail]]),
+                       (nm, Rule' [[NonTerminal' nmHead, NonTerminal' nmTails],
+                                   [NonTerminal' nmHead]])]
     where
         nmHead = extendId "head" nm
         nmTail = extendId "tail" nm
         nmTails = extendId "tails" nm
 
-        beginsWith :: Identifier -> Rule -> Bool
-        beginsWith nm (Seq ((NonTerminal nm'):_)) = nm == nm'
+        beginsWith :: Identifier -> [Elt] -> Bool
+        beginsWith nm ((NonTerminal' nm'):_) = nm == nm'
         beginsWith _ _ = False
 
-        dropFirst (Seq []) = error "bang"
-        dropFirst (Seq (x:xs)) = Seq xs
-        dropFirst r = r
+elimImmediateRecursion :: Grammar' -> Grammar'
+elimImmediateRecursion =
+    M.fromList .
+    concatMap elimImmediateRecursion' .
+    M.toList
 
-rmImmediateRecursion' p = [p]
-
-rmImmediateRecursion :: Grammar -> Grammar
-rmImmediateRecursion g = M.fromList ps
+-- Unit productions have the form A -> B, so every use
+-- of A can be replaced with B, eliminating A
+elimUnits :: Grammar' -> Grammar'
+elimUnits g = foldr (\p g -> M.map ((uncurry replace) p) g) g units
     where
-        ps = concatMap rmImmediateRecursion' $ M.toList g
+        units = concatMap findUnits . M.toList $ g
 
---rmRecursion :: Grammar -> Grammar
--- FIXME: prune productions that aren't reachable from the top level
+        findUnits :: Production' -> [(Identifier, Identifier)]
+        findUnits (x, Rule' [[(NonTerminal' y)]]) = [(x, y)]
+        findUnits _ = []
 
--- FIXME: we should remove epsilons, but there aren't any left in the
--- C grammar after normalisation.
+        replace :: Identifier -> Identifier -> Rule' -> Rule'
+        replace old new (Rule' gs) = Rule' $ map (map (replaceElt old new)) gs
 
--- We want to do the equivalent of:
--- for (i = 0; i < nr_rules; i++)
---     for (j = 0; j < i; j++)
---        do_thing()
+        replaceElt :: Identifier -> Identifier -> Elt -> Elt
+        replaceElt old new e@(NonTerminal' nm) | old == nm = NonTerminal' new
+        replaceElt _ _ r = r
 
--- FIXME: use a sequence
--- across :: (a -> a -> a) -> [a] -> [a]
+elimUnreferenced :: Grammar' -> Grammar'
+elimUnreferenced g = foldr erase g unrefs
+    where
+        all = S.fromList . M.keys $ g
+        refs = foldr findRefs S.empty $ M.elems g
+        unrefs = S.toList $ all `S.difference` refs
 
--- rmImmediateRecursion ::
--- rmLeftRecursion :: [(String, Rule)] -> [(String, Rule)]
--- rmLeftRecursion rs =
+        erase :: Identifier -> Grammar' -> Grammar'
+        erase nm g = M.delete nm g
 
+        findRefs :: Rule' -> Set Identifier -> Set Identifier
+        findRefs (Rule' gs) s = foldr fromSeq s gs
 
-cGrammar :: Grammar
+        fromSeq gs s = foldr fromElt s gs
+        fromElt (NonTerminal' nm) s = S.insert nm s
+        fromElt _ s = s
+
+cGrammar :: Grammar'
 cGrammar =
-    normalise .
-    rmImmediateRecursion .
+    elimUnreferenced .
+    elimUnits .
+    elimImmediateRecursion .
+    toRep3 .
     normalise .
     nonTerminals $
     translationUnit
 
 type Doc = PP.Doc ()
 
-showRule :: Rule -> Doc
-showRule (Terminal txt) = PP.pretty $ "\"" ++ txt ++ "\""
-showRule (NonTerminal nm) = PP.pretty nm
-showRule (Seq gs) = PP.parens . PP.hsep . map showRule $ gs
-showRule (Alt gs) = PP.parens . PP.sep . PP.punctuate (PP.pretty " |") . map showRule $ gs
-showRule Epsilon = PP.pretty "epsilon"
+showRule :: Rule' -> Doc
+showRule (Rule' gs) = PP.sep . PP.punctuate (PP.pretty " |") . map showSeq $ gs
+    where
+        showSeq xs = PP.hsep . map PP.pretty $ xs
 
 main = forM_ (M.toList cGrammar) $ \(nm, g) -> do
     PP.putDocW 120 $ PP.pretty nm PP.<> PP.pretty ":" PP.<> PP.line PP.<> (PP.indent 4 $ showRule g)
