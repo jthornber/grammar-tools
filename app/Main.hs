@@ -695,21 +695,11 @@ elimUnits g = foldr (\p g -> M.map ((uncurry replace) p) g) g units
         replaceElt _ _ r = r
 
 elimUnreferenced :: Identifier -> Grammar' -> Grammar'
-elimUnreferenced top g = foldr erase g unrefs
+elimUnreferenced top g = foldr copy M.empty $ getIdentifiers g top
     where
-        all = S.fromList . M.keys $ g
-        refs = S.insert top $ foldr findRefs S.empty $ M.elems g
-        unrefs = S.toList $ all `S.difference` refs
-
-        erase :: Identifier -> Grammar' -> Grammar'
-        erase nm g = M.delete nm g
-
-        findRefs :: Rule' -> Set Identifier -> Set Identifier
-        findRefs (Rule' gs) s = foldr fromSeq s gs
-
-        fromSeq gs s = foldr fromElt s gs
-        fromElt (NonTerminal' nm) s = S.insert nm s
-        fromElt _ s = s
+        copy nm g' = case M.lookup nm g of
+            Just r -> M.insert nm r g'
+            Nothing -> error "couldn't find non terminal in grammar"
 
 start :: Identifier
 start = mkId "translation-unit"
