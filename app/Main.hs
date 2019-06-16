@@ -26,7 +26,7 @@ import Debug.Trace
 -- than once.
 data Lex = Literal String |
            Token String
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 instance PP.Pretty Lex where
     pretty (Literal str) = PP.pretty "\"" <> PP.pretty str <> PP.pretty "\""
@@ -632,9 +632,11 @@ elimImmediateRecursion =
     concatMap elimImmediateRecursion' .
     M.toList
 
+uniq = S.toList . S.fromList
+
 references :: Identifier -> Grammar' -> [Identifier]
 references nm g = case M.lookup nm g of
-    Just (Rule' rs) -> concatMap getId . concat $ rs
+    Just (Rule' rs) -> uniq . concatMap getId . concat $ rs
     Nothing -> error "couldn't find identifier in grammar"
     where
         getId :: Elt -> [Identifier]
@@ -647,7 +649,7 @@ getIdentifiers g nm = loop [nm] [] (S.singleton nm)
     where
         loop :: [Identifier] -> [Identifier] -> Set Identifier -> [Identifier]
         loop [] acc seen = acc
-        loop (x:xs) acc seen = loop (xs ++ unseen) (x:acc) (foldr (\nm s -> S.insert nm s) seen unseen)
+        loop (x:xs) acc seen = loop (xs ++ unseen) (x:acc) (foldr S.insert seen unseen)
             where
                 rs = references x g
                 unseen = filter (not . (\nm -> S.member nm seen)) rs
@@ -701,6 +703,15 @@ elimUnreferenced top g = foldr copy M.empty $ getIdentifiers g top
             Just r -> M.insert nm r g'
             Nothing -> error "couldn't find non terminal in grammar"
 
+firstPos :: Identifier -> Grammar' -> Set Lex
+firstPos nm g = case M.lookup nm g of
+    Just (Rule' xs) -> foldr scan S.empty xs
+    Nothing -> error "couldn't find non terminal in grammar"
+    where
+        scan [] s = s
+        scan ((NonTerminal' nm'):_) s = S.union s (firstPos nm' g)
+        scan ((Terminal' l):_) s = S.insert l s
+
 start :: Identifier
 start = mkId "translation-unit"
 
@@ -725,10 +736,24 @@ showRule (Rule' gs) = PP.sep . PP.punctuate (PP.pretty " |") . map showSeq $ gs
     where
         showSeq xs = PP.hsep . map PP.pretty $ xs
 
-main = forM_ (M.toList cGrammar) $ \(nm, g) -> do
-    PP.putDocW 120 $ PP.pretty nm PP.<> PP.pretty ":" PP.<> PP.line PP.<> (PP.indent 4 $ showRule g)
-    putStrLn ""
-    putStrLn ""
+showRules :: Grammar' -> Identifier -> Doc
+showRules g top = PP.sep $ map format nms
+    where
+        nms = getIdentifiers g top
+
+        format :: Identifier -> Doc
+        format nm = case M.lookup nm g of
+            Just r -> PP.pretty nm PP.<> PP.pretty ": " PP.<> PP.line PP.<> (PP.indent 4 $ showRule r) PP.<> PP.line
+            Nothing -> error "couldn't lookup non terminal in grammar"
+
+showFirstPos :: Grammar' -> Identifier -> Doc
+showFirstPos g top = PP.sep $ map (\nm -> PP.pretty nm PP.<> PP.pretty ": " PP.<> PP.prettyList (S.toList $ firstPos nm g)) nms
+    where
+        nms = getIdentifiers g top
+
+main = do
+    PP.putDocW 120 $ showRules cGrammar start
+    -- PP.putDocW 120 $ showFirstPos cGrammar start
 
 traceIt :: (Show a) => a -> a
 traceIt x = trace (show x) x
