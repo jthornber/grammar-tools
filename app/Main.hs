@@ -1,5 +1,6 @@
 module Main where
 
+import CommonPrefix
 import Control.Monad
 import Data.List
 import Data.Map.Strict (Map)
@@ -569,7 +570,7 @@ normalise = M.map (stabilise norm)
 -- Now that we've normalised we can change rep
 -- once again to force it to stay normalised.
 
-data Elt = Terminal' Lex | NonTerminal' Identifier deriving (Eq, Show)
+data Elt = Terminal' Lex | NonTerminal' Identifier deriving (Eq, Ord, Show)
 
 instance PP.Pretty Elt where
     pretty (Terminal' l) = PP.pretty l
@@ -703,6 +704,39 @@ elimUnreferenced top g = foldr copy M.empty $ getIdentifiers g top
             Just r -> M.insert nm r g'
             Nothing -> error "couldn't find non terminal in grammar"
 
+--------------------------------------------
+-- Left factor
+
+factor :: Production' -> [Production']
+factor p@(nm, Rule' xs) =
+    if null subs then [p] else (newParent : children)
+    where
+        names :: [Identifier]
+        names = map (\n -> extendId n nm) (map show [1..])
+
+        subs :: [(Identifier, ([Elt], [[Elt]]))]
+        subs = zip names $ commonPrefix xs
+
+        newParent = (nm, Rule' $ map parentProduction subs)
+
+        parentProduction (newNm, (prefix, tails)) =
+            if length tails == 1
+                then prefix ++ head tails
+                else prefix ++ [NonTerminal' newNm]
+
+        children :: [Production']
+        children = concatMap child subs
+
+        child (newNm, (prefix, tails)) =
+            if length tails == 1
+                then []
+                else [(newNm, Rule' tails)]
+
+leftFactor :: Grammar' -> Grammar'
+leftFactor = M.fromList . concatMap factor . M.toList
+
+--------------------------------------------------------
+
 firstPos :: Identifier -> Grammar' -> Set Lex
 firstPos nm g = case M.lookup nm g of
     Just (Rule' xs) -> foldr scan S.empty xs
@@ -717,6 +751,9 @@ start = mkId "translation-unit"
 
 cGrammar :: Grammar'
 cGrammar =
+    elimUnreferenced start .
+    elimUnits .
+    leftFactor .
     elimUnreferenced start .
     elimUnits .
     elimImmediateRecursion .
@@ -734,6 +771,7 @@ type Doc = PP.Doc ()
 showRule :: Rule' -> Doc
 showRule (Rule' gs) = PP.sep . PP.punctuate (PP.pretty " |") . map showSeq $ gs
     where
+        showSeq [] = PP.pretty "epsilon"
         showSeq xs = PP.hsep . map PP.pretty $ xs
 
 showRules :: Grammar' -> Identifier -> Doc
