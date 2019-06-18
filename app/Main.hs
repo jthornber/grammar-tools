@@ -577,7 +577,7 @@ instance PP.Pretty Elt where
     pretty (NonTerminal' nm) = PP.pretty nm
 
 -- Rules are now forced to be an implicit Alt of Seqs
-data Rule' = Rule' [[Elt]] deriving (Eq, Show)
+data Rule' = Rule' [[Elt]] deriving (Eq, Ord, Show)
 
 type Production' = (Identifier, Rule')
 type Grammar' = Map Identifier Rule'
@@ -704,6 +704,28 @@ elimUnreferenced top g = foldr copy M.empty $ getIdentifiers g top
             Just r -> M.insert nm r g'
             Nothing -> error "couldn't find non terminal in grammar"
 
+type RMap = Map Rule' Identifier
+type IdMap = Map Identifier Identifier
+
+elimDuplicates :: Grammar' -> Grammar'
+elimDuplicates g = M.map updateNonTerminals g
+    where
+        updateNonTerminals :: Rule' -> Rule'
+        updateNonTerminals (Rule' xs) = Rule' $ map (map update) xs
+
+        update (NonTerminal' nm) = case M.lookup nm rmap of
+            Just nm' -> NonTerminal' nm'
+            Nothing -> error "non terminal not found"
+        update e = e
+
+        rmap :: IdMap
+        rmap = snd . foldr scan (M.empty, M.empty) . M.toList $ g
+
+        scan :: Production' -> (RMap, IdMap) -> (RMap, IdMap)
+        scan (nm, r) (rm, im) = case M.lookup r rm of
+            Just nm' -> (rm, M.insert nm nm' im)
+            Nothing -> (M.insert r nm rm, M.insert nm nm im)
+
 --------------------------------------------
 -- Left factor
 
@@ -752,6 +774,7 @@ start = mkId "translation-unit"
 cGrammar :: Grammar'
 cGrammar =
     elimUnreferenced start .
+    elimDuplicates .
     elimUnits .
     leftFactor .
     elimUnreferenced start .
